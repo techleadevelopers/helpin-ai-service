@@ -1,4 +1,4 @@
-﻿# ZooHelp Python Workers
+﻿# <img src="https://res.cloudinary.com/limpeja/image/upload/v1779071066/Gemini_Generated_Image_v5ufmcv5ufmcv5uf-removebg-preview_lcxvg8.png" alt="ZooHelp Logo" width="58" align="center"> Helpin Python Workers
 
 Servicos auxiliares para IA e automacao. Nao devem virar API publica principal.
 
