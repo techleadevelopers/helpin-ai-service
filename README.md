@@ -186,6 +186,364 @@ UX:
 - admin ve o relatorio completo;
 - usuario final ve somente atualizacao publica enxuta.
 
+### Relatorio final de resgate
+
+O relatorio final deve ser simples para a ONG, mas robusto para auditoria. A
+IA gera um rascunho; a ONG ou admin aprova, edita ou rejeita.
+
+Versao minima obrigatoria:
+
+```ts
+type RescueStatus =
+  | "rescued"      // animal salvo/localizado e em seguranca
+  | "not_found"    // busca concluida sem localizar o animal
+  | "died"         // animal encontrado sem vida
+  | "referred"     // caso encaminhado para ONG, clinica, tutor ou outro responsavel
+  | "cancelled"    // chamado cancelado antes da conclusao
+  | "false_alarm"; // emergencia reportada nao existia ou nao se confirmou
+
+type ReportPublicationStatus =
+  | "draft"
+  | "pending_approval"
+  | "published"
+  | "rejected";
+
+type ReportRejectionReason =
+  | "wrong_status"
+  | "inaccurate_summary"
+  | "contains_errors"
+  | "other";
+
+type RescueFinalReport = {
+  rescueId: string;
+  postId: string;
+
+  status: RescueStatus;
+
+  // 1-2 frases, linguagem operacional.
+  summary: string;
+
+  // 1 frase para usuarios finais. Pode ser igual ao summary se estiver limpa.
+  publicUpdate: string;
+
+  generatedByAi: boolean;
+  approvedBy?: string; // userId da ONG ou admin
+  approvedAt?: string; // ISO timestamp
+
+  publicationStatus: ReportPublicationStatus;
+  rejectionReason?: ReportRejectionReason;
+
+  // Controle explicito para evolucao futura do schema.
+  version: 1 | 2;
+  schemaVersion: "1.0.0";
+
+  createdAt: string; // ISO timestamp
+  updatedAt?: string;
+};
+```
+
+Exemplo minimo:
+
+```json
+{
+  "rescueId": "rescue_123",
+  "postId": "post_456",
+  "status": "rescued",
+  "summary": "Cao ferido foi localizado, resgatado e encaminhado para atendimento veterinario.",
+  "publicUpdate": "Atualizacao: o animal foi resgatado e esta recebendo cuidados.",
+  "generatedByAi": true,
+  "publicationStatus": "pending_approval",
+  "version": 1,
+  "schemaVersion": "1.0.0",
+  "createdAt": "2026-05-27T15:38:00Z"
+}
+```
+
+Campos opcionais para a versao completa:
+
+```ts
+type RescueFinalReportFull = RescueFinalReport & {
+  timeline?: Array<{
+    time: string;
+    event: string;
+    actorType?: "user" | "ong" | "system" | "ai";
+  }>;
+
+  responseMetrics?: {
+    firstResponseMinutes?: number;
+    volunteersConfirmed?: number;
+    incidentsReported?: number;
+    chatMessagesCount?: number;
+  };
+
+  aiNotes?: {
+    riskAtStart?: "low" | "medium" | "high";
+    riskAtEnd?: "low" | "medium" | "high";
+    importantSignals?: string[];
+    suggestedFollowUp?: string;
+  };
+
+  adminNotes?: string;
+};
+```
+
+Fluxo de estado:
+
+```text
+Resgate encerrado
+       |
+       v
+IA gera rascunho (publicationStatus = draft)
+       |
+       v
+API Rust marca como pending_approval e notifica ONG
+       |
+       v
+ONG revisa tela de aprovacao
+       |
+   +---+---+
+   |       |
+   v       v
+Aprova   Rejeita/Edita
+   |       |
+   v       v
+published draft/rejected
+```
+
+Regras de exibicao:
+- usuario final ve apenas `status` e `publicUpdate`;
+- ONG ve `status`, `summary`, `publicUpdate` e pode editar antes de publicar;
+- admin ve timeline, metricas, notas de IA, custo, latencia e historico.
+
+#### Prompt fixo para geracao do relatorio final
+
+O prompt deve ser versionado junto do schema. Alteracoes relevantes devem
+incrementar `schemaVersion` ou `promptVersion`.
+
+```markdown
+## System Prompt - Rescue Final Report Generation
+
+You are an operational assistant for Helpin, a rescue coordination platform.
+
+### Input Data
+You will receive:
+- Original post (description, location, images metadata)
+- Rescue timeline (events with timestamps)
+- Volunteer count
+- Incident reports
+- Chat message summary (if available)
+
+### Output Requirements (STRICT)
+
+Generate a JSON object with:
+
+1. `statusSuggestion`: One of ["rescued", "not_found", "died", "referred", "cancelled", "false_alarm"]
+   - "rescued" = animal was found and is now safe
+   - "not_found" = search concluded without locating the animal
+   - "died" = animal was found deceased
+   - "referred" = case transferred to another organization
+   - "cancelled" = rescue was called off before completion
+   - "false_alarm" = reported emergency did not exist
+
+2. `summary`: EXACTLY 1-2 sentences, operational language, third person past tense
+   - Example: "Cao foi localizado na Rua das Flores e encaminhado para Clinica Veterinaria Solidaria."
+
+3. `publicUpdate`: EXACTLY 1 sentence, user-friendly language, first-person or neutral
+   - Example: "Atualizacao: o animal foi resgatado e esta recebendo cuidados."
+
+### Rules
+- DO NOT include specific addresses or personal contact information
+- DO NOT make medical diagnoses
+- DO NOT guarantee outcomes (e.g., "will survive")
+- DO NOT blame volunteers, victims, or third parties
+- If confidence is low (<70%), set `confidence: "low"` in metadata
+
+### Output Format
+Return ONLY valid JSON. No markdown, no explanation.
+```
+
+#### Endpoints recomendados na API Rust
+
+O worker Python pode expor endpoints internos `/ai/*`, mas os endpoints
+publicos/autenticados devem ficar na API Rust.
+
+```text
+POST /v1/rescue/:rescueId/generate-report
+```
+
+Gera rascunho automaticamente ao encerrar resgate ou sob demanda.
+
+```json
+{
+  "reportId": "report_789",
+  "statusSuggestion": "rescued",
+  "summary": "Cao foi localizado e encaminhado para atendimento.",
+  "publicUpdate": "Atualizacao: o animal foi resgatado e esta recebendo cuidados."
+}
+```
+
+```text
+GET /v1/rescue/:rescueId/report/draft
+```
+
+ONG visualiza o rascunho pendente.
+
+```text
+POST /v1/rescue/:rescueId/report/publish
+```
+
+ONG aprova e pode editar antes de publicar.
+
+```json
+{
+  "status": "rescued",
+  "summary": "Texto editado opcional",
+  "publicUpdate": "Texto publico opcional"
+}
+```
+
+```text
+GET /v1/posts/:postId/rescue-report
+```
+
+Busca relatorio publicado para exibicao publica.
+
+```text
+GET /v1/admin/reports?status=pending&limit=50
+```
+
+Admin consulta fila e historico de relatorios.
+
+#### Tabela recomendada
+
+```sql
+CREATE TABLE rescue_reports (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  rescue_id UUID NOT NULL REFERENCES rescues(id),
+  post_id UUID NOT NULL REFERENCES posts(id),
+
+  status VARCHAR(20) NOT NULL,
+  summary TEXT NOT NULL,
+  public_update TEXT NOT NULL,
+
+  generated_by_ai BOOLEAN DEFAULT false,
+  ai_model VARCHAR(50),
+  ai_confidence FLOAT,
+  ai_latency_ms INTEGER,
+  ai_cost_cents INTEGER,
+
+  publication_status VARCHAR(20) DEFAULT 'draft',
+  approved_by UUID REFERENCES users(id),
+  approved_at TIMESTAMP,
+  rejection_reason TEXT,
+
+  timeline JSONB,
+  response_metrics JSONB,
+  ai_notes JSONB,
+  admin_notes TEXT,
+
+  version INTEGER DEFAULT 1,
+  schema_version VARCHAR(10) DEFAULT '1.0.0',
+
+  created_at TIMESTAMP DEFAULT NOW(),
+  updated_at TIMESTAMP DEFAULT NOW()
+);
+
+CREATE INDEX idx_reports_rescue_id ON rescue_reports(rescue_id);
+CREATE INDEX idx_reports_post_id ON rescue_reports(post_id);
+CREATE INDEX idx_reports_status ON rescue_reports(publication_status);
+CREATE INDEX idx_reports_approved_at ON rescue_reports(approved_at);
+```
+
+#### Regras de negocio
+
+Validacoes obrigatorias:
+
+```ts
+const VALIDATION_RULES = {
+  summary: {
+    maxLength: 280,
+    required: true,
+    noPII: true,
+    noDiagnosis: true,
+  },
+  publicUpdate: {
+    maxLength: 140,
+    required: true,
+    familyFriendly: true,
+  },
+  status: {
+    allowed: ["rescued", "not_found", "died", "referred", "cancelled", "false_alarm"],
+  },
+};
+```
+
+Politica de retry:
+
+```ts
+const RETRY_CONFIG = {
+  maxAttempts: 3,
+  backoffMs: [1000, 2000, 4000],
+  fallbackToTemplate: true,
+};
+```
+
+Fallback se a IA falhar:
+
+```json
+{
+  "status": "referred",
+  "summary": "Caso encerrado pela equipe responsavel. Detalhes aguardam revisao.",
+  "publicUpdate": "Atualizacao: o caso foi encerrado pela equipe responsavel.",
+  "generatedByAi": false,
+  "publicationStatus": "pending_approval"
+}
+```
+
+#### UI de aprovacao para ONG
+
+```text
++-------------------------------------------------------------+
+|  Resgate concluido - Pendente de relatorio                  |
++-------------------------------------------------------------+
+|                                                             |
+|  Status sugerido pela IA:                                   |
+|  o Resgatado     o Nao encontrado     o Falso alarme        |
+|  x Encaminhado   o Cancelado          o Falecido            |
+|                                                             |
+|  Resumo editavel:                                           |
+|  +-------------------------------------------------------+  |
+|  | Cao foi localizado na regiao informada e encaminhado  |  |
+|  | para atendimento responsavel.                         |  |
+|  +-------------------------------------------------------+  |
+|                                                             |
+|  Atualizacao publica editavel:                             |
+|  +-------------------------------------------------------+  |
+|  | Atualizacao: o animal foi resgatado e esta recebendo  |  |
+|  | cuidados.                                             |  |
+|  +-------------------------------------------------------+  |
+|                                                             |
+|  [Cancelar]                          [Aprovar e publicar]  |
++-------------------------------------------------------------+
+```
+
+#### Custos e limites
+
+Adicionar em `ai_assessments` e/ou `rescue_reports`:
+
+```text
+ai_latency_ms
+ai_cost_cents
+ai_model
+prompt_version
+```
+
+Politica de produto:
+- plano gratuito: classificacao basica e relatorio simples;
+- plano premium ONG: assistente durante resgate, risco avancado, relatorio
+  detalhado e auditoria expandida;
+- admin deve enxergar custo por chamada, latencia media e taxa de rejeicao.
+
 ## Persistencia esperada na API Rust
 
 Este worker deve retornar sugestoes. A API Rust deve persistir os resultados em
