@@ -611,12 +611,79 @@ A IA confirmou emergencia real.
 
 ## Ordem de implementacao
 
+Esta ordem separa o que e IA pura do que e backend/mobile. A regra principal:
+o worker Python gera sugestoes; a API Rust decide permissao, persistencia,
+auditoria e exposicao publica.
+
 1. Criar `rescue_events` na API Rust.
 2. Criar endpoint Rust que chama `POST /ai/rescue-brief`.
 3. Exibir `Assistente de Resgate` no mobile e admin.
 4. Criar `POST /ai/final-rescue-report`.
-5. Persistir e revisar `rescue_reports`.
+5. Persistir e revisar `rescue_reports`/`rescue_final_reports`.
 6. Adicionar `POST /ai/post-assessment` na publicacao.
+
+## Auditoria de implementacao
+
+Status atual observado no codigo:
+
+| Area | Status | Observacao |
+| --- | --- | --- |
+| `POST /ai/final-rescue-report` no Python worker | Parcial/feito | Endpoint existe e retorna fallback deterministico auditavel. Provider real ainda nao foi plugado. |
+| Migration `rescue_final_reports` | Parcial/feito | Tabela, constraints e indices existem em migration e runtime schema. |
+| Rotas Rust de final report | Parcial/feito | Rotas `generate/get/approve/reject` foram registradas no router. Precisa teste de integracao. |
+| Construtores de `Post` | Parcial/feito | Campo `rescue_final_report` foi adicionado nos principais construtores encontrados. |
+| Feed | Parcial/feito | Feed passa a anexar relatorio publicado quando existir. Precisa validar em teste real. |
+| Post detail | Parcial/feito | `GET /v1/posts/:id` carrega relatorio publicado por post. Precisa validar em teste real. |
+| Mobile contract | Parcial/feito | Tipos TypeScript e mapper aceitam `rescueFinalReport`. Falta UI final para exibir. |
+| Chamada real Rust -> Python worker | Parcial/feito | Rust chama `/ai/final-rescue-report` quando `AI_WORKER_URL` esta configurado e cai para fallback em erro. |
+| `rescue_events` | Pendente | Ainda falta criar evento auditavel de timeline para alimentar brief/relatorio com qualidade. |
+| `POST /ai/rescue-brief` | Pendente | Ainda falta endpoint Python e endpoint Rust consumidor. |
+| `POST /ai/post-assessment` | Pendente | Ainda falta analise pre-publicacao. |
+
+### O que falta, priorizado
+
+#### Alto - imediato
+
+| Tarefa | Arquivo/area | Descricao |
+| --- | --- | --- |
+| Validar compilacao completa | `backend` | Rodar `cargo check` e `cargo test`; a ultima execucao foi interrompida antes de concluir. |
+| Testes do final report | `backend/src/routes/rescue.rs` ou testes de integracao | Cobrir generate idempotente, approve, reject, permissao e public/private response. |
+| Confirmar auto-geracao | `backend/src/routes/rescue.rs` | Garantir que encerrar rescue dispara relatorio sem bloquear o encerramento. |
+| Listagem admin de pendentes | `backend/src/routes/admin.rs` | Criar consulta para `publication_status = pending_approval`. |
+| UI de aprovacao ONG/admin | mobile/admin | Tela para revisar, editar, aprovar ou rejeitar antes de publicar. |
+
+#### Medio - proximo sprint
+
+| Tarefa | Descricao |
+| --- | --- |
+| Criar `rescue_events` | Registrar timeline real: publicado, voluntario a caminho, chegou, incidente, encerrado. |
+| Criar `POST /ai/rescue-brief` | Gerar resumo operacional, proxima acao, risco e checklist durante o resgate. |
+| Exibir Assistente de Resgate | Bloco compacto no mobile/admin: resumo, risco, proxima acao. |
+| Melhorar contexto enviado ao worker | Enviar post, rescue session, responses, incidentes e chat summary em vez de apenas ids/status. |
+| Worker com provider real | Adicionar provedor IA configuravel, prompt versionado, timeout e custo estimado. |
+| Mobile UI do publicUpdate | Exibir `rescueFinalReport.publicUpdate` apenas quando vier publicado da API. |
+
+#### Baixo - refinamento
+
+| Tarefa | Descricao |
+| --- | --- |
+| Observabilidade | Logs estruturados por chamada IA: latency, model, cost, fallback, status. |
+| Rate limiting | Proteger generate/approve/reject contra abuso e repeticao desnecessaria. |
+| Sanitizacao PII | Mascarar telefone, email e endereco completo antes de enviar ao provedor IA. |
+| Warnings/limpeza | Remover helpers sem uso ou cobrir com testes unitarios. |
+| Auditoria expandida | Salvar input hash/output JSON para reprodutibilidade sem vazar dados sensiveis. |
+
+### Gaps de produto
+
+- IA nao pode ser lancada como protagonista visual. No produto, ela deve aparecer
+  como assistente operacional compacto.
+- O relatorio final nao deve virar documento longo. O MVP bom e:
+  `status`, `summary`, `publicUpdate`, `publicationStatus`, auditoria e aprovacao.
+- Usuario final nunca deve ver rascunho, erro de IA, custo, notas internas ou
+  `summary` operacional.
+- ONG/admin sempre devem conseguir editar antes de publicar.
+- Se o worker cair, o fluxo do resgate precisa continuar com fallback
+  deterministico.
 
 Frase guia do produto:
 
